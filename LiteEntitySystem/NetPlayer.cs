@@ -6,7 +6,7 @@ namespace LiteEntitySystem
     public class NetPlayer
     {
         public readonly byte Id;
-        public readonly AbstractNetPeer Peer;
+        public readonly IAbstractNetPeer Peer;
         
         internal ushort LastProcessedTick;
         internal ushort LastReceivedTick;
@@ -18,7 +18,7 @@ namespace LiteEntitySystem
         internal NetPlayerState State;
         internal readonly SequenceBinaryHeap<InputBuffer> AvailableInput = new (ServerEntityManager.MaxStoredInputs);
 
-        internal NetPlayer(AbstractNetPeer peer, byte id)
+        internal NetPlayer(IAbstractNetPeer peer, byte id)
         {
             Id = id;
             Peer = peer;

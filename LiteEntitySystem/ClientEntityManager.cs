@@ -82,7 +82,7 @@ namespace LiteEntitySystem
         /// <summary>
         /// Client network peer
         /// </summary>
-        public AbstractNetPeer NetPeer => _netPeer;
+        public IAbstractNetPeer NetPeer => _netPeer;
 
         /// <summary>
         /// Network jitter in milliseconds
@@ -106,7 +106,7 @@ namespace LiteEntitySystem
         }
 
         private readonly EntityFilter<InternalEntity> _predictedEntityFilter = new();
-        private readonly AbstractNetPeer _netPeer;
+        private readonly IAbstractNetPeer _netPeer;
         private readonly Queue<ServerStateData> _statesPool = new(MaxSavedStateDiff);
         private readonly Dictionary<ushort, ServerStateData> _receivedStates = new();
         private readonly SequenceBinaryHeap<ServerStateData> _readyStates = new(MaxSavedStateDiff);
@@ -171,7 +171,7 @@ namespace LiteEntitySystem
         public ClientEntityManager(
             EntityTypesMap typesMap, 
             InputProcessor inputProcessor, 
-            AbstractNetPeer netPeer, 
+            IAbstractNetPeer netPeer, 
             byte headerByte, 
             byte framesPerSecond) : base(typesMap, inputProcessor, NetworkMode.Client, framesPerSecond, headerByte)
         {
@@ -197,7 +197,7 @@ namespace LiteEntitySystem
         /// <typeparam name="TInput">Main input packet type</typeparam>
         public static ClientEntityManager Create<TInput>(
             EntityTypesMap typesMap, 
-            AbstractNetPeer netPeer, 
+            IAbstractNetPeer netPeer, 
             byte headerByte, 
             byte framesPerSecond) where TInput : unmanaged
         {

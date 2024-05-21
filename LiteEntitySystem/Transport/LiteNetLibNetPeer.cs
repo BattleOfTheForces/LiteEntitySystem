@@ -3,10 +3,13 @@ using LiteNetLib;
 
 namespace LiteEntitySystem.Transport
 {
-    public class LiteNetLibNetPeer : AbstractNetPeer
+    public class LiteNetLibNetPeer : IAbstractNetPeer
     {
         public readonly NetPeer NetPeer;
-        
+        protected NetPlayer NetPlayer;
+        NetPlayer IAbstractNetPeer.AssignedPlayer { get => NetPlayer; set => NetPlayer = value; }
+        public int RoundTripTimeMs => NetPeer.RoundTripTime;
+
         public LiteNetLibNetPeer(NetPeer netPeer, bool assignToTag)
         {
             NetPeer = netPeer;
@@ -14,10 +17,10 @@ namespace LiteEntitySystem.Transport
                 NetPeer.Tag = this;
         }
 
-        public override void TriggerSend() => NetPeer.NetManager.TriggerUpdate();
-        public override void SendReliableOrdered(ReadOnlySpan<byte> data) => NetPeer.Send(data, 0, DeliveryMethod.ReliableOrdered);
-        public override void SendUnreliable(ReadOnlySpan<byte> data) => NetPeer.Send(data, 0, DeliveryMethod.Unreliable);
-        public override int GetMaxUnreliablePacketSize() => NetPeer.GetMaxSinglePacketSize(DeliveryMethod.Unreliable);
+        public void TriggerSend() => NetPeer.NetManager.TriggerUpdate();
+        public void SendReliableOrdered(ReadOnlySpan<byte> data) => NetPeer.Send(data, 0, DeliveryMethod.ReliableOrdered);
+        public void SendUnreliable(ReadOnlySpan<byte> data) => NetPeer.Send(data, 0, DeliveryMethod.Unreliable);
+        public int GetMaxUnreliablePacketSize() => NetPeer.GetMaxSinglePacketSize(DeliveryMethod.Unreliable);
         public override string ToString() => NetPeer.ToString();
     }
 

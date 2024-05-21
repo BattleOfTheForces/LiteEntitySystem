@@ -115,7 +115,7 @@ namespace LiteEntitySystem
         /// </summary>
         /// <param name="peer">AbstractPeer to use</param>
         /// <returns>Newly created player, null if players count is maximum</returns>
-        public NetPlayer AddPlayer(AbstractNetPeer peer)
+        public NetPlayer AddPlayer(IAbstractNetPeer peer)
         {
             if (_netPlayers.Count == MaxPlayers)
                 return null;
@@ -138,7 +138,7 @@ namespace LiteEntitySystem
         /// </summary>
         /// <param name="player">player to remove</param>
         /// <returns>true if player removed successfully, false if player not found</returns>
-        public bool RemovePlayer(AbstractNetPeer player) =>
+        public bool RemovePlayer(IAbstractNetPeer player) =>
             RemovePlayer(player.AssignedPlayer);
         
         /// <summary>
@@ -163,7 +163,7 @@ namespace LiteEntitySystem
         /// </summary>
         /// <param name="player">player</param>
         /// <returns>Instance if found, null if not</returns>
-        public ControllerLogic GetPlayerController(AbstractNetPeer player) =>
+        public ControllerLogic GetPlayerController(IAbstractNetPeer player) =>
             GetPlayerController(player.AssignedPlayer);
         
         /// <summary>
@@ -265,7 +265,7 @@ namespace LiteEntitySystem
         /// </summary>
         /// <param name="peer">Player that sent input</param>
         /// <param name="inData">incoming data with header</param>
-        public DeserializeResult Deserialize(AbstractNetPeer peer, ReadOnlySpan<byte> inData) =>
+        public DeserializeResult Deserialize(IAbstractNetPeer peer, ReadOnlySpan<byte> inData) =>
             Deserialize(peer.AssignedPlayer, inData);
 
         /// <summary>
