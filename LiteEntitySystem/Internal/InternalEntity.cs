@@ -4,8 +4,28 @@ using System.Runtime.CompilerServices;
 
 namespace LiteEntitySystem.Internal
 {
-    public abstract class InternalEntity : IComparable<InternalEntity>
+    internal struct EntityDataHeader
     {
+        public ushort Id;
+        public ushort ClassId;
+        public byte Version;
+        public int CreationTick;
+    }
+    
+    public class EntityComparer : IComparer<InternalEntity>
+    {
+        public int Compare(InternalEntity x, InternalEntity y) => x.CompareTo(y);
+
+        public static readonly EntityComparer Instance = new();
+    }
+    
+    public abstract class InternalEntity : InternalBaseClass, IComparable<InternalEntity>
+    {
+        [SyncVarFlags(SyncFlags.NeverRollBack)]
+        internal SyncVar<byte> InternalOwnerId;
+        
+        internal byte[] IOBuffer;
+        
         /// <summary>
         /// Entity class id
         /// </summary>
@@ -15,16 +35,39 @@ namespace LiteEntitySystem.Internal
         /// Entity instance id
         /// </summary>
         public readonly ushort Id;
+
+        /// <summary>
+        /// Entity creation tick number that can be more than ushort
+        /// </summary>
+        internal readonly int CreationTick;
         
         /// <summary>
         /// Entity manager
         /// </summary>
         public readonly EntityManager EntityManager;
+
+        /// <summary>
+        /// Is entity on server
+        /// </summary>
+        protected internal bool IsServer => EntityManager.IsServer;
         
+        /// <summary>
+        /// Is entity on server
+        /// </summary>
+        protected bool IsClient => EntityManager.IsClient;
+
         /// <summary>
         /// Entity version (for id reuse)
         /// </summary>
         public readonly byte Version;
+
+        internal EntityDataHeader DataHeader => new EntityDataHeader
+        {
+            Id = Id,
+            ClassId = ClassId,
+            CreationTick = CreationTick,
+            Version = Version
+        };
         
         [SyncVarFlags(SyncFlags.NeverRollBack)]
         private SyncVar<bool> _isDestroyed;
@@ -64,18 +107,15 @@ namespace LiteEntitySystem.Internal
         /// ServerPlayerId - 0
         /// Singletons always controlled by server
         /// </summary>
-        public virtual byte OwnerId => EntityManager.ServerPlayerId;
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal ref EntityClassData GetClassData()
-        {
-            return ref EntityManager.ClassDataDict[ClassId];
-        }
+        public byte OwnerId => InternalOwnerId;
 
         /// <summary>
         /// Is locally created entity
         /// </summary>
         public bool IsLocal => Id >= EntityManager.MaxSyncedEntityCount;
+        
+        internal ref EntityClassData ClassData => ref EntityManager.ClassDataDict[ClassId];
+
 
         /// <summary>
         /// Destroy entity
@@ -91,7 +131,7 @@ namespace LiteEntitySystem.Internal
         {
             if (!prevValue && _isDestroyed)
             {
-                _isDestroyed = false;
+                _isDestroyed.Value = false;
                 DestroyInternal();
             }
         }
@@ -108,9 +148,10 @@ namespace LiteEntitySystem.Internal
         {
             if (_isDestroyed)
                 return;
-            _isDestroyed = true;
+            _isDestroyed.Value = true;
             OnDestroy();
             EntityManager.RemoveEntity(this);
+            ClassData.ReleaseDataCache(this);
         }
 
         internal void SafeUpdate()
@@ -126,14 +167,30 @@ namespace LiteEntitySystem.Internal
         }
 
         /// <summary>
-        /// Fixed update. Called if entity has attribute <see cref="UpdateableEntity"/>
+        /// Fixed update. Called if entity has attribute <see cref="EntityFlagsAttribute"/> and flag Updateable
         /// </summary>
         protected internal virtual void Update()
         {
         }
+        
+        /// <summary>
+        /// Called at rollback begin before all values reset to first frame in rollback queue.
+        /// </summary>
+        protected internal virtual void OnBeforeRollback()
+        {
+            
+        }
 
         /// <summary>
-        /// Called only on <see cref="ClientEntityManager.Update"/> and if entity has attribute <see cref="UpdateableEntity"/>
+        /// Called at rollback begin after all values reset to first frame in rollback queue.
+        /// </summary>
+        protected internal virtual void OnRollback()
+        {
+            
+        }
+
+        /// <summary>
+        /// Called only on <see cref="ClientEntityManager.Update"/> and if entity has attribute <see cref="EntityFlagsAttribute"/> and flag Updateable
         /// </summary>
         protected internal virtual void VisualUpdate()
         {
@@ -149,17 +206,27 @@ namespace LiteEntitySystem.Internal
 
         internal void RegisterRpcInternal()
         {
-            ref var classData = ref GetClassData();
+            ref var classData = ref ClassData;
+            
+            //setup field ids for BindOnChange and pass on server this for OnChangedEvent to StateSerializer
+            var onChangeTarget = EntityManager.IsServer && !IsLocal ? this : null;
+            for (int i = 0; i < classData.FieldsCount; i++)
+            {
+                ref var field = ref classData.Fields[i];
+                if (field.FieldType == FieldType.SyncVar)
+                {
+                    field.TypeProcessor.InitSyncVar(this, field.Offset, onChangeTarget, (ushort)i);
+                }
+                else
+                {
+                    var syncableField = RefMagic.RefFieldValue<SyncableField>(this, field.Offset);
+                    field.TypeProcessor.InitSyncVar(syncableField, field.SyncableSyncVarOffset, onChangeTarget, (ushort)i);
+                }
+            }
+          
             List<RpcFieldInfo> rpcCahce = null;
             if(classData.RemoteCallsClient == null)
             {
-                //setup field ids for BindOnChange
-                for (int i = 0; i < classData.FieldsCount; i++)
-                {
-                    ref var field = ref classData.Fields[i];
-                    if (field.FieldType == FieldType.SyncVar)
-                        RefMagic.RefFieldValue<byte>(this, field.Offset + field.IntSize) = (byte)i;
-                }
                 rpcCahce = new List<RpcFieldInfo>();
                 var rpcRegistrator = new RPCRegistrator(rpcCahce);
                 RegisterRPC(ref rpcRegistrator);
@@ -192,23 +259,7 @@ namespace LiteEntitySystem.Internal
             classData.RemoteCallsClient ??= rpcCahce.ToArray();
         }
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        protected void ExecuteRPC(in RemoteCall rpc)
-        {
-            ((Action<InternalEntity>)rpc.CachedAction)(this);
-        }
-        
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        protected void ExecuteRPC<T>(in RemoteCall<T> rpc, T value) where T : unmanaged
-        {
-            ((Action<InternalEntity, T>)rpc.CachedAction)(this, value);
-        }
-        
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        protected void ExecuteRPC<T>(in RemoteCallSpan<T> rpc, ReadOnlySpan<T> value) where T : unmanaged
-        {
-            ((SpanAction<InternalEntity, T>)rpc.CachedAction)(this, value);
-        }
+
 
         /// <summary>
         /// Method for registering RPCs and OnChange notifications
@@ -225,23 +276,29 @@ namespace LiteEntitySystem.Internal
             Id = entityParams.Id;
             ClassId = entityParams.ClassId;
             Version = entityParams.Version;
+            CreationTick = entityParams.CreationTime;
+            ClassData.AllocateDataCache(this);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public int CompareTo(InternalEntity other)
         {
+            int creationTimeDiff = CreationTick - other.CreationTick;
+            if (creationTimeDiff != 0)
+                return creationTimeDiff;
+
+            int versionDiff = Version - other.Version;
+            if (versionDiff != 0)
+                return versionDiff;
+            
             //local first because mostly this is unity physics or something similar
             return (Id >= EntityManager.MaxSyncedEntityCount ? Id - ushort.MaxValue : Id) -
                    (other.Id >= EntityManager.MaxSyncedEntityCount ? other.Id - ushort.MaxValue : other.Id);
         }
 
-        public override int GetHashCode()
-        {
-            return Id + Version * ushort.MaxValue;
-        }
+        public override int GetHashCode() => Id + Version * ushort.MaxValue;
 
-        public override string ToString()
-        {
-            return $"Entity. Id: {Id}, ClassId: {ClassId}, Version: {Version}";
-        }
+        public override string ToString() =>
+            $"Entity. Id: {Id}, ClassId: {ClassId}, Version: {Version}";
     }
 }

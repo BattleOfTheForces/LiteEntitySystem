@@ -5,15 +5,11 @@ namespace LiteEntitySystem
     /// <summary>
     /// Base class for Controller entities
     /// </summary>
+    [EntityFlags(EntityFlags.OnlyForOwner)]
     public abstract class ControllerLogic : InternalEntity
     {
         [SyncVarFlags(SyncFlags.NeverRollBack)]
-        internal SyncVar<byte> InternalOwnerId;
-        
-        [SyncVarFlags(SyncFlags.NeverRollBack)]
         private SyncVar<EntitySharedReference> _controlledEntity;
-
-        public override byte OwnerId => InternalOwnerId.Value;
         
         /// <summary>
         /// Is controller - AI controller
@@ -41,7 +37,13 @@ namespace LiteEntitySystem
             _controlledEntity.Value = target;
             GetControlledEntity<PawnLogic>().Controller = this;
         }
-        
+
+        protected override void OnDestroy()
+        {
+            StopControl();
+            base.OnDestroy();
+        }
+
         public void StopControl()
         {
             var controlledLogic = GetControlledEntity<PawnLogic>();
@@ -57,7 +59,7 @@ namespace LiteEntitySystem
     /// <summary>
     /// Base class for AI Controller entities
     /// </summary>
-    [LocalOnly, UpdateableEntity]
+    [EntityFlags(EntityFlags.LocalOnly | EntityFlags.Updateable)]
     public abstract class AiControllerLogic : ControllerLogic
     {
         public override bool IsBot => true;
@@ -68,7 +70,7 @@ namespace LiteEntitySystem
     /// <summary>
     /// Base class for AI Controller entities with typed ControlledEntity field
     /// </summary>
-    [LocalOnly, UpdateableEntity]
+    [EntityFlags(EntityFlags.LocalOnly | EntityFlags.Updateable)]
     public abstract class AiControllerLogic<T> : AiControllerLogic where T : PawnLogic
     {
         public T ControlledEntity => GetControlledEntity<T>();

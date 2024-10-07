@@ -19,71 +19,87 @@ namespace LiteEntitySystem
     [AttributeUsage(AttributeTargets.Field | AttributeTargets.Class)]
     public class SyncVarFlags : Attribute
     {
-        internal readonly SyncFlags Flags;
-
+        public readonly SyncFlags Flags;
+        public readonly OnSyncExecutionOrder OnSyncExecutionOrder;
+        
         public SyncVarFlags(SyncFlags flags)
         {
             Flags = flags;
         }
+        
+        public SyncVarFlags(OnSyncExecutionOrder executionOrder)
+        {
+            OnSyncExecutionOrder = executionOrder;
+        }
+        
+        public SyncVarFlags(SyncFlags flags, OnSyncExecutionOrder executionOrder)
+        {
+            Flags = flags;
+            OnSyncExecutionOrder = executionOrder;
+        }
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    public unsafe struct SyncVar<T> where T : unmanaged
+    public struct SyncVar<T> : IEquatable<T>, IEquatable<SyncVar<T>> where T : unmanaged
     {
-        public T Value;
-        internal byte FieldId;
-
-        public SyncVar(T value)
+        private T _value;
+        internal ushort FieldId;
+        internal InternalEntity Container;
+        
+        public T Value
         {
-            Value = value;
-            FieldId = 0;
+            get => _value;
+            set
+            {
+                if (Container != null && !Container.IsDestroyed && !Utils.FastEquals(ref value, ref _value))
+                    Container.ServerManager.EntityFieldChanged(Container, FieldId, ref value);
+                _value = value;
+            }
         }
 
-        public static implicit operator T(SyncVar<T> sv)
+        internal void Init(InternalEntity container, ushort fieldId)
         {
-            return sv.Value;
+            Container = container;
+            FieldId = fieldId;
+            if(Container != null)
+                Container.ServerManager.EntityFieldChanged(Container, FieldId, ref _value);
         }
         
-        public static implicit operator SyncVar<T>(T v)
+        internal unsafe bool SetFromAndSync(byte* data)
         {
-            return new SyncVar<T> { Value = v };
-        }
-
-        public override string ToString()
-        {
-            return Value.ToString();
-        }
-
-        public override int GetHashCode()
-        {
-            return Value.GetHashCode();
+            if (!Utils.FastEquals(ref _value, data))
+            {
+                var temp = _value;
+                _value = *(T*)data;
+                *(T*)data = temp;
+                return true;
+            }
+            _value = *(T*)data;
+            return false;
         }
         
-        public override bool Equals(object o)
-        {
-            return this == (SyncVar<T>)o;
-        }
+        public static implicit operator T(SyncVar<T> sv) => sv._value;
 
-        private static readonly int Size = sizeof(T);
+        public override string ToString() => _value.ToString();
 
-        public static bool operator==(SyncVar<T> a, SyncVar<T> b)
-        {
-            return new ReadOnlySpan<byte>(&a.Value, Size).SequenceEqual(new ReadOnlySpan<byte>(&b.Value, Size));
-        }
+        public override int GetHashCode() => _value.GetHashCode();
+
+        public override bool Equals(object o) => o is SyncVar<T> sv && Utils.FastEquals(ref sv._value, ref _value);
         
-        public static bool operator!=(SyncVar<T> a, SyncVar<T> b)
-        {
-            return new ReadOnlySpan<byte>(&a.Value, Size).SequenceEqual(new ReadOnlySpan<byte>(&b.Value, Size)) == false;
-        }
+        public static bool operator==(SyncVar<T> a, SyncVar<T> b) => Utils.FastEquals(ref a._value, ref b._value);
+
+        public static bool operator!=(SyncVar<T> a, SyncVar<T> b) => Utils.FastEquals(ref a._value, ref b._value) == false;
         
-        public static bool operator==(T a, SyncVar<T> b)
-        {
-            return new ReadOnlySpan<byte>(&a, Size).SequenceEqual(new ReadOnlySpan<byte>(&b.Value, Size));
-        }
+        public static bool operator==(T a, SyncVar<T> b) => Utils.FastEquals(ref a, ref b._value);
         
-        public static bool operator!=(T a, SyncVar<T> b)
-        {
-            return new ReadOnlySpan<byte>(&a, Size).SequenceEqual(new ReadOnlySpan<byte>(&b.Value, Size)) == false;
-        }
+        public static bool operator!=(T a, SyncVar<T> b) => Utils.FastEquals(ref a, ref b._value) == false;
+        
+        public static bool operator==(SyncVar<T> a, T b) => Utils.FastEquals(ref b, ref a._value);
+        
+        public static bool operator!=(SyncVar<T> a, T b) => Utils.FastEquals(ref b, ref a._value) == false;
+
+        public bool Equals(T v) => Utils.FastEquals(ref _value, ref v);
+        
+        public bool Equals(SyncVar<T> tv) => Utils.FastEquals(ref _value, ref tv._value);
     }
 }
