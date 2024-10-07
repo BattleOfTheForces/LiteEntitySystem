@@ -136,8 +136,6 @@ namespace LiteEntitySystem
         /// </summary>
         public byte PlayerId => InternalPlayerId;
 
-        public int GameSpeedMultiplier => SpeedMultiplier;
-
         public readonly byte HeaderByte;
         
         public bool InRollBackState => UpdateMode == UpdateMode.PredictionRollback;
@@ -162,7 +160,7 @@ namespace LiteEntitySystem
         private readonly Stopwatch _stopwatch = new();
         private readonly IdGeneratorUShort _localIdQueue = new(MaxSyncedEntityCount, MaxEntityCount);
         private readonly SingletonEntityLogic[] _singletonEntities;
-        private readonly EntityFilter[] _entityFilters;
+        private readonly IEntityFilter[] _entityFilters;
         private readonly Dictionary<Type, ushort> _registeredTypeIds = new();
 
         internal readonly InternalEntity[] EntitiesDict = new InternalEntity[MaxEntityCount+1];
@@ -177,16 +175,26 @@ namespace LiteEntitySystem
 
         internal byte InternalPlayerId;
         protected readonly InputProcessor InputProcessor;
-        protected int SpeedMultiplier;
+        protected float SpeedMultiplier;
+        protected int TotalTicksPassed;
+
+        protected const float TimeSpeedChangeCoef = 0.1f;
+
+        /// <summary>
+        /// Is entity manager running
+        /// IsRunning - true after first update
+        /// IsRunning - sets to false after Reset() call
+        /// </summary>
+        public bool IsRunning => _stopwatch.IsRunning;
         
         public static void RegisterFieldType<T>(InterpolatorDelegateWithReturn<T> interpolationDelegate) where T : unmanaged =>
-            ValueProcessors.RegisteredProcessors[typeof(T)] = new UserTypeProcessor<T>(interpolationDelegate);
+            ValueTypeProcessor.Registered[typeof(T)] = new UserTypeProcessor<T>(interpolationDelegate);
         
         public static void RegisterFieldType<T>() where T : unmanaged =>
-            ValueProcessors.RegisteredProcessors[typeof(T)] = new UserTypeProcessor<T>(null);
+            ValueTypeProcessor.Registered[typeof(T)] = new UserTypeProcessor<T>(null);
 
         private static void RegisterBasicFieldType<T>(ValueTypeProcessor<T> proc) where T : unmanaged =>
-            ValueProcessors.RegisteredProcessors.Add(typeof(T), proc);
+            ValueTypeProcessor.Registered.Add(typeof(T), proc);
 
         static EntityManager()
         {
@@ -194,18 +202,18 @@ namespace LiteEntitySystem
             if (IntPtr.Size == 4)
                 K4os.Compression.LZ4.LZ4Codec.Enforce32 = true;
 #endif
-            RegisterBasicFieldType(new ValueTypeProcessorByte());
-            RegisterBasicFieldType(new ValueTypeProcessorSByte());
-            RegisterBasicFieldType(new ValueTypeProcessorShort());
-            RegisterBasicFieldType(new ValueTypeProcessorUShort());
+            RegisterBasicFieldType(new ValueTypeProcessor<byte>());
+            RegisterBasicFieldType(new ValueTypeProcessor<sbyte>());
+            RegisterBasicFieldType(new ValueTypeProcessor<short>());
+            RegisterBasicFieldType(new ValueTypeProcessor<ushort>());
             RegisterBasicFieldType(new ValueTypeProcessorInt());
-            RegisterBasicFieldType(new ValueTypeProcessorUInt());
+            RegisterBasicFieldType(new ValueTypeProcessor<uint>());
             RegisterBasicFieldType(new ValueTypeProcessorLong());
-            RegisterBasicFieldType(new ValueTypeProcessorULong());
+            RegisterBasicFieldType(new ValueTypeProcessor<ulong>());
             RegisterBasicFieldType(new ValueTypeProcessorFloat());
             RegisterBasicFieldType(new ValueTypeProcessorDouble());
-            RegisterBasicFieldType(new ValueTypeProcessorBool());
-            RegisterBasicFieldType(new ValueTypeProcessorEntitySharedReference());
+            RegisterBasicFieldType(new ValueTypeProcessor<bool>());
+            RegisterBasicFieldType(new ValueTypeProcessor<EntitySharedReference>());
             RegisterFieldType<FloatAngle>(FloatAngle.Lerp);
         }
 
@@ -237,7 +245,7 @@ namespace LiteEntitySystem
                 ClassDataDict[registeredType.ClassId].PrepareBaseTypes(_registeredTypeIds, ref singletonCount, ref filterCount);
             }
 
-            _entityFilters = new EntityFilter[filterCount];
+            _entityFilters = new IEntityFilter[filterCount];
             _singletonEntities = new SingletonEntityLogic[singletonCount];
 
             InputProcessor = inputProcessor;
@@ -250,7 +258,7 @@ namespace LiteEntitySystem
             DeltaTimeF = (float) DeltaTime;
             _stopwatchFrequency = 1.0 / Stopwatch.Frequency;
             _deltaTimeTicks = (long)(DeltaTime * Stopwatch.Frequency);
-            _slowdownTicks = (long)(DeltaTime * 0.01f * Stopwatch.Frequency);
+            _slowdownTicks = (long)(DeltaTime * TimeSpeedChangeCoef * Stopwatch.Frequency);
             if (_slowdownTicks < 100)
                 _slowdownTicks = 100;
         }
@@ -258,24 +266,20 @@ namespace LiteEntitySystem
         /// <summary>
         /// Remove all entities and reset all counters and timers
         /// </summary>
-        public void Reset()
+        public virtual void Reset()
         {
             EntitiesCount = 0;
 
+            TotalTicksPassed = 0;
             _tick = 0;
             VisualDeltaTime = 0.0;
             _accumulator = 0;
             _lastTime = 0;
             InternalPlayerId = 0;
             _localIdQueue.Reset();
-            _stopwatch.Restart();
+            _stopwatch.Stop();
+            _stopwatch.Reset();
             AliveEntities.Clear();
-
-            for (int i = 0; i < _singletonEntities.Length; i++)
-            {
-                _singletonEntities[i]?.DestroyInternal();
-                _singletonEntities[i] = null;
-            }
             
             for (int i = FirstEntityId; i <= MaxSyncedEntityId; i++)
             {
@@ -286,6 +290,11 @@ namespace LiteEntitySystem
             {
                 EntitiesDict[i]?.DestroyInternal();
                 EntitiesDict[i] = null;
+            }
+            for (int i = 0; i < _singletonEntities.Length; i++)
+            {
+                _singletonEntities[i]?.DestroyInternal();
+                _singletonEntities[i] = null;
             }
 
             for (int i = 0; i < _entityFilters.Length; i++)
@@ -326,7 +335,6 @@ namespace LiteEntitySystem
             if (entityFilter != null)
             {
                 typedFilter = (EntityFilter<T>)entityFilter;
-                typedFilter.Refresh();
                 return typedFilter;
             }
             
@@ -344,7 +352,6 @@ namespace LiteEntitySystem
                 if(EntitiesDict[i] is T castedEnt)
                     typedFilter.Add(castedEnt);
             }
-            typedFilter.Refresh();
             return typedFilter;
         }
 
@@ -426,11 +433,12 @@ namespace LiteEntitySystem
                 EntityClassInfo<T>.ClassId,
                 _localIdQueue.GetNewId(), 
                 0,
+                TotalTicksPassed,
                 this);
             var entity = (T)AddEntity(entityParams);
             if (IsClient && entity is EntityLogic logic)
             {
-                logic.InternalOwnerId = InternalPlayerId;
+                logic.InternalOwnerId.Value = InternalPlayerId;
             }
 
             initMethod?.Invoke(entity);
@@ -492,14 +500,14 @@ namespace LiteEntitySystem
             if (IsEntityAlive(classData, e))
                 AliveEntities.Add(e);
             if (IsEntityLagCompensated(e))
-                LagCompensatedEntities.Add(e);
+                LagCompensatedEntities.Add((EntityLogic)e);
         }
 
         private static bool IsEntityLagCompensated(InternalEntity e)
-            => !e.IsLocal && e is EntityLogic { HasLagCompensation: true };
+            => !e.IsLocal && e is EntityLogic && e.ClassData.LagCompensatedCount > 0;
 
         private bool IsEntityAlive(EntityClassData classData, InternalEntity entity)
-            => classData.IsUpdateable && (IsServer || entity.IsLocal || (IsClient && classData.UpdateOnClient));
+            => classData.Flags.HasFlagFast(EntityFlags.Updateable) && (IsServer || entity.IsLocal || (IsClient && classData.Flags.HasFlagFast(EntityFlags.UpdateOnClient)));
 
         internal virtual void RemoveEntity(InternalEntity e)
         {
@@ -521,8 +529,8 @@ namespace LiteEntitySystem
             if (IsEntityAlive(classData, e))
                 AliveEntities.Remove(e);
             if(IsEntityLagCompensated(e))
-                LagCompensatedEntities.Remove(e);
-            if (classData.IsLocalOnly)
+                LagCompensatedEntities.Remove((EntityLogic)e);
+            if (classData.Flags.HasFlagFast(EntityFlags.LocalOnly))
                 _localIdQueue.ReuseId(e.Id);
             EntitiesDict[e.Id] = null;
             EntitiesCount--;
@@ -571,7 +579,7 @@ namespace LiteEntitySystem
             VisualDeltaTime = ticksDelta * _stopwatchFrequency;
             _accumulator += ticksDelta;
             _lastTime = elapsedTicks;
-            long maxTicks = _deltaTimeTicks - SpeedMultiplier * _slowdownTicks;
+            long maxTicks = (long)(_deltaTimeTicks + SpeedMultiplier * _slowdownTicks);
 
             int updates = 0;
             while (_accumulator >= maxTicks)
@@ -585,6 +593,7 @@ namespace LiteEntitySystem
                 }
                 OnLogicTick();
                 _tick++;
+                TotalTicksPassed++;
 
                 _accumulator -= maxTicks;
                 updates++;

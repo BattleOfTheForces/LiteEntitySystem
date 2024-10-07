@@ -94,7 +94,7 @@ namespace LiteEntitySystem.Internal
                     continue;
                 }
 
-                ref readonly var classData = ref entity.GetClassData();
+                ref readonly var classData = ref entity.ClassData;
                 int entityFieldsOffset = initialReaderPosition + StateSerializer.DiffHeaderSize;
                 int stateReaderOffset = fullSync 
                     ? initialReaderPosition + StateSerializer.HeaderSize + sizeof(ushort) 
@@ -149,7 +149,14 @@ namespace LiteEntitySystem.Internal
                 var syncableField = RefMagic.RefFieldValue<SyncableField>(entity, rpc.SyncableOffset);
                 if (syncSet.Add(syncableField))
                     syncableField.BeforeReadRPC();
-                rpc.Delegate(syncableField, new ReadOnlySpan<byte>(Data, rpc.Offset, rpc.Header.TypeSize * rpc.Header.Count));
+                try
+                {
+                    rpc.Delegate(syncableField, new ReadOnlySpan<byte>(Data, rpc.Offset, rpc.Header.ByteCount));
+                }
+                catch (Exception e)
+                {
+                    Logger.LogError($"Error when executing syncableRPC: {entity}. RPCID: {rpc.Header.Id}. {e}");
+                }
             }
             foreach (var syncableField in syncSet)
                 syncableField.AfterReadRPC();
@@ -188,7 +195,14 @@ namespace LiteEntitySystem.Internal
                 }
                 rpc.Executed = true;
                 entityManager.CurrentRPCTick = rpc.Header.Tick;
-                rpc.Delegate(entity, new ReadOnlySpan<byte>(Data, rpc.Offset, rpc.Header.TypeSize * rpc.Header.Count));
+                try
+                {
+                    rpc.Delegate(entity, new ReadOnlySpan<byte>(Data, rpc.Offset, rpc.Header.ByteCount));
+                }
+                catch (Exception e)
+                {
+                    Logger.LogError($"Error when executing RPC: {entity}. RPCID: {rpc.Header.Id}. {e}");
+                }
             }
             entityManager.IsExecutingRPC = false;
         }
@@ -220,7 +234,7 @@ namespace LiteEntitySystem.Internal
                     _syncableRemoteCallsCount++;
                 }
      
-                position += header.TypeSize * header.Count;
+                position += header.ByteCount;
             }
         }
 

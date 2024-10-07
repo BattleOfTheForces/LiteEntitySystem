@@ -1,40 +1,50 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using LiteEntitySystem.Internal;
 
 namespace LiteEntitySystem
 {
-    /// <summary>
-    /// Entity has update method
-    /// </summary>
-    [AttributeUsage(AttributeTargets.Class)]
-    public class UpdateableEntity : Attribute
+    [Flags]
+    public enum EntityFlags
     {
-        public readonly bool UpdateOnClient;
-
-        public UpdateableEntity() { }
+        /// <summary>
+        /// Update entity on client even when entity isn't owned
+        /// </summary>
+        UpdateOnClient = Updateable | (1 << 0), 
         
-        public UpdateableEntity(bool updateOnClient)
+        /// <summary>
+        /// Update entity on server and on client if entity is owned 
+        /// </summary>
+        Updateable = 1 << 1,                    
+        
+        /// <summary>
+        /// Entity is local only without sync (only on server or client no difference)
+        /// </summary>
+        LocalOnly = 1 << 2,                     
+        
+        /// <summary>
+        /// Sync entity only for owner player
+        /// </summary>
+        OnlyForOwner = 1 << 3
+    }
+    
+    [AttributeUsage(AttributeTargets.Class)]
+    public class EntityFlagsAttribute : Attribute
+    {
+        public readonly EntityFlags Flags;
+        
+        public EntityFlagsAttribute(EntityFlags flags)
         {
-            UpdateOnClient = updateOnClient;
+            Flags = flags;
         }
     }
-
-    /// <summary>
-    /// Entity is local only (only on server or client no difference)
-    /// </summary>
-    [AttributeUsage(AttributeTargets.Class)]
-    public class LocalOnly : Attribute { }
-
+    
     /// <summary>
     /// Base class for simple (not controlled by controller) entity
     /// </summary>
     public abstract class EntityLogic : InternalEntity
     {
-        //It should be in such order because later it checks rollbacks
-        [SyncVarFlags(SyncFlags.NeverRollBack)]
-        internal SyncVar<byte> InternalOwnerId;
-        
         [SyncVarFlags(SyncFlags.NeverRollBack)]
         private SyncVar<EntitySharedReference> _parentId;
 
@@ -44,90 +54,36 @@ namespace LiteEntitySystem
         public HashSet<EntityLogic> Childs => _childsSet ??= new HashSet<EntityLogic>();
         private HashSet<EntityLogic> _childsSet;
         
-        public override byte OwnerId => InternalOwnerId.Value;
-
         public EntitySharedReference ParentId => _parentId;
         
-        private readonly byte[] _history;
-        private readonly EntityFieldInfo[] _lagCompensatedFields;
-        private readonly int _lagCompensatedSize;
-        private readonly int _lagCompensatedCount;
-        private int _filledHistory;
         private bool _lagCompensationEnabled;
-
-        public bool HasLagCompensation => _lagCompensatedSize > 0;
-
+        
         public EntitySharedReference SharedReference => new EntitySharedReference(this);
-
-        internal unsafe void WriteHistory(ushort tick)
-        {
-            byte maxHistory = (byte)EntityManager.MaxHistorySize;
-            _filledHistory = Math.Min(_filledHistory + 1, maxHistory);
-            int historyOffset = ((tick % maxHistory)+1)*_lagCompensatedSize;
-            fixed (byte* history = _history)
-            {
-                for (int i = 0; i < _lagCompensatedCount; i++)
-                {
-                    ref var field = ref _lagCompensatedFields[i];
-                    field.TypeProcessor.WriteTo(this, field.Offset, history + historyOffset);
-                    historyOffset += field.IntSize;
-                }
-            }
-        }
+        
+        internal void WriteHistory(ushort tick) => ClassData.WriteHistory(this, tick);
         
         //on client it works only in rollback
-        internal unsafe void EnableLagCompensation(NetPlayer player)
+        internal void EnableLagCompensation(NetPlayer player)
         {
             if (_lagCompensationEnabled || InternalOwnerId.Value == player.Id)
                 return;
             ushort tick = EntityManager.IsClient ? ClientManager.ServerTick : EntityManager.Tick;
-            byte maxHistory = (byte)EntityManager.MaxHistorySize;
             if (Utils.SequenceDiff(player.StateATick, tick) >= 0 || Utils.SequenceDiff(player.StateBTick, tick) > 0)
             {
                 Logger.Log($"LagCompensationMiss. Tick: {tick}, StateA: {player.StateATick}, StateB: {player.StateBTick}");
                 return;
             }
-            int historyAOffset = ((player.StateATick % maxHistory)+1)*_lagCompensatedSize;
-            int historyBOffset = ((player.StateBTick % maxHistory)+1)*_lagCompensatedSize;
-            int historyCurrent = 0;
-
-            fixed (byte* history = _history)
-            {
-                for (int i = 0; i < _lagCompensatedCount; i++)
-                {
-                    ref var field = ref _lagCompensatedFields[i];
-                    field.TypeProcessor.LoadHistory(
-                        this, 
-                        field.Offset,
-                        history + historyCurrent,
-                        history + historyAOffset,
-                        history + historyBOffset,
-                        player.LerpTime);
-                    historyAOffset += field.IntSize;
-                    historyBOffset += field.IntSize;
-                    historyCurrent += field.IntSize;
-                }
-            }
-
+            ClassData.LoadHistroy(player, this);
             OnLagCompensationStart();
             _lagCompensationEnabled = true;
         }
 
-        internal unsafe void DisableLagCompensation()
+        internal void DisableLagCompensation()
         {
             if (!_lagCompensationEnabled)
                 return;
             _lagCompensationEnabled = false;
-            int historyOffset = 0;
-            fixed (byte* history = _history)
-            {
-                for (int i = 0; i < _lagCompensatedCount; i++)
-                {
-                    ref var field = ref _lagCompensatedFields[i];
-                    field.TypeProcessor.SetFrom(this, field.Offset, history + historyOffset);
-                    historyOffset += field.IntSize;
-                }
-            }
+            ClassData.UndoHistory(this);
             OnLagCompensationEnd();
         }
 
@@ -146,17 +102,13 @@ namespace LiteEntitySystem
         /// <summary>
         /// Disable lag compensation for player that owns this entity
         /// </summary>
-        public void DisableLagCompensationForOwner()
-        {
+        public void DisableLagCompensationForOwner() =>
             EntityManager.DisableLagCompensation();
-        }
         
-        public int GetFrameSeed()
-        {
-            return EntityManager.IsClient
+        public int GetFrameSeed() =>
+            EntityManager.IsClient
                 ? (EntityManager.InRollBackState ? ClientManager.RollBackTick : (ClientManager.IsExecutingRPC ? ClientManager.CurrentRPCTick : EntityManager.Tick)) 
                 : (InternalOwnerId.Value == EntityManager.ServerPlayerId ? EntityManager.Tick : ServerManager.GetPlayer(InternalOwnerId).LastProcessedTick);
-        }
         
         /// <summary>
         /// Create predicted entity (like projectile) that will be replaced by server entity if prediction is successful
@@ -204,14 +156,12 @@ namespace LiteEntitySystem
                 return;
             
             EntitySharedReference oldId = _parentId;
-            _parentId = id;
+            _parentId.Value = id;
             OnParentChange(oldId);
             
             var newParent = EntityManager.GetEntityById<EntityLogic>(_parentId)?.InternalOwnerId ?? EntityManager.ServerPlayerId;
-            if (InternalOwnerId.Value != newParent.Value)
-            {
+            if (InternalOwnerId.Value != newParent)
                 SetOwner(this, newParent);
-            }
         }
         
         /// <summary>
@@ -244,20 +194,35 @@ namespace LiteEntitySystem
         {
             if (IsDestroyed)
                 return;
+
+            //temporary copy childs to array because childSet can be modified inside
+            var childsCopy = _childsSet?.ToArray();
+            if (childsCopy != null) //notify child entities about parent destruction
+                foreach (var entityLogic in childsCopy)
+                    entityLogic.OnBeforeParentDestroy();
+
             base.DestroyInternal();
             if (EntityManager.IsClient && IsLocalControlled && !IsLocal)
             {
                 ClientManager.RemoveOwned(this);
             }
             var parent = EntityManager.GetEntityById<EntityLogic>(_parentId);
-            if (parent != null && !parent.IsDestroyed)
+            if (parent != null && !parent.IsDestroyed && parent._childsSet != null)
             {
-                parent.Childs.Remove(this);
+                parent._childsSet.Remove(this);
             }
-            foreach (var entityLogic in Childs)
-            {
-                entityLogic.Destroy();
-            }
+
+            if (_childsSet != null)
+                foreach (var entityLogic in _childsSet)
+                    entityLogic.Destroy();
+        }
+
+        /// <summary>
+        /// Called before parent destroy
+        /// </summary>
+        protected virtual void OnBeforeParentDestroy()
+        {
+            
         }
         
         private void OnOwnerChange(byte prevOwner)
@@ -270,36 +235,32 @@ namespace LiteEntitySystem
 
         private void OnParentChange(EntitySharedReference oldId)
         {
-            EntityManager.GetEntityById<EntityLogic>(oldId)?.Childs.Remove(this);
+            EntityManager.GetEntityById<EntityLogic>(oldId)?._childsSet?.Remove(this);
             EntityManager.GetEntityById<EntityLogic>(_parentId)?.Childs.Add(this);
         }
 
         internal static void SetOwner(EntityLogic entity, byte ownerId)
         {
-            entity.InternalOwnerId = ownerId;
-            foreach (var child in entity.Childs)
+            entity.InternalOwnerId.Value = ownerId;
+            entity.ServerManager.EntityOwnerChanged(entity);
+            if (entity._childsSet == null) 
+                return;
+            foreach (var child in entity._childsSet)
             {
                 SetOwner(child, ownerId);
             }
         }
-
+        
         protected override void RegisterRPC(ref RPCRegistrator r)
         {
             base.RegisterRPC(ref r);
             r.BindOnChange(this, ref _parentId, OnParentChange);
             r.BindOnChange(this, ref InternalOwnerId, OnOwnerChange);
         }
-
+        
         protected EntityLogic(EntityParams entityParams) : base(entityParams)
         {
-            ref readonly var classData = ref GetClassData();
-            _lagCompensatedSize = classData.LagCompensatedSize;
-            if (_lagCompensatedSize > 0)
-            {
-                _history = new byte[((byte)EntityManager.MaxHistorySize+1) * _lagCompensatedSize];
-                _lagCompensatedFields = classData.LagCompensatedFields;
-                _lagCompensatedCount = classData.LagCompensatedCount;
-            }
+
         }
     }
 }
